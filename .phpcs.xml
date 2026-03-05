@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<ruleset name="AI Provider for Bedrock">
+    <description>Coding standards for AI Provider for Bedrock plugin.</description>
+
+    <file>src/</file>
+    <file>plugin.php</file>
+
+    <exclude-pattern>vendor/*</exclude-pattern>
+    <exclude-pattern>tests/*</exclude-pattern>
+
+    <rule ref="PSR12"/>
+
+    <arg name="colors"/>
+    <arg value="sp"/>
+</ruleset>
