@@ -1,6 +1,8 @@
 # AI Provider for Claude on Bedrock
 
-Amazon Bedrock Claude provider for WordPress AI Client.
+A third-party provider for Amazon Bedrock Claude in the [PHP AI Client SDK](https://github.com/WordPress/php-ai-client). Works as both a Composer package and a WordPress plugin.
+
+This project is independent and is not affiliated with, endorsed by, or sponsored by Amazon.
 
 ## Description
 
@@ -10,13 +12,15 @@ This plugin extends the WordPress AI Client SDK to enable Claude model access th
 
 | Model | Bedrock Model ID |
 |---|---|
-| Claude Opus 4.6 | `anthropic.claude-opus-4-20250514` |
-| Claude Sonnet 4.6 | `anthropic.claude-sonnet-4-20250514` |
-| Claude Haiku 4.5 | `anthropic.claude-haiku-4-20250514` |
+| Claude Opus 4.6 | `anthropic.claude-opus-4-6-v1` |
+| Claude Sonnet 4.6 | `anthropic.claude-sonnet-4-6` |
+| Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` |
+
+These Claude models do not support on-demand invocation of the bare foundation-model ID, so the plugin exposes them as cross-region inference profile IDs, prefixed with the geographic area derived from the configured region (e.g. `eu.anthropic.claude-sonnet-4-6` for `eu-north-1`, `us.` for US regions).
 
 ## Requirements
 
-- PHP 8.1 or higher
+- ⚠️ PHP 8.1 or higher
 - WordPress 6.9 or higher
 - WordPress AI Client SDK (`wordpress/php-ai-client`)
 - AWS account with Bedrock access
@@ -30,29 +34,50 @@ This plugin extends the WordPress AI Client SDK to enable Claude model access th
 
 ## Configuration
 
-### Option 1: PHP Constants (recommended for production)
+Two authentication methods are supported:
 
-Add to your `wp-config.php`:
+- **Bedrock API key** (simplest): generate one in the Amazon Bedrock console under **API keys**. It is sent as a Bearer token.
+- **IAM access key pair**: requests are signed with AWS Signature V4. Also works with IAM users/roles you manage yourself.
+
+When both are configured, the API key takes precedence.
+
+### Option 1: WordPress core connectors page (recommended)
+
+The provider declares API key authentication, so it appears on the WordPress
+core AI connectors settings page alongside other providers. Enter your Bedrock
+API key there — no plugin-specific configuration needed. A key stored this way
+takes precedence over the plugin's own settings.
+
+### Option 2: PHP Constants (recommended for production)
+
+Add to your `wp-config.php`, either:
 
 ```php
-define('BEDROCK_ACCESS_KEY_ID', 'AKIAIOSFODNN7EXAMPLE');
-define('BEDROCK_SECRET_ACCESS_KEY', 'wJalrXUtnFEMI/K7MDENG/bPlusCfrISMYEXAMPLE');
+define('BEDROCK_API_KEY', '...your Bedrock API key...');
 define('BEDROCK_REGION', 'eu-north-1');
 ```
 
-### Option 2: WordPress Settings
+or:
 
-Navigate to **Settings > Bedrock AI Provider** in the WordPress admin panel and enter your AWS credentials.
+```php
+define('BEDROCK_ACCESS_KEY_ID', 'XXXXXXXXXXXISEXAMPLE');
+define('BEDROCK_SECRET_ACCESS_KEY', 'wJalrXUtnFEMI/K7MDENG/bPlusCfrxyISEXAMPLE');
+define('BEDROCK_REGION', 'eu-north-1');
+```
+
+### Option 3: WordPress Settings
+
+Navigate to **Settings > Bedrock AI Provider** in the WordPress admin panel and enter your credentials. This page is also where the AWS region is configured (the connectors page only stores the API key).
 
 ### Credential Priority
 
-1. PHP constants (highest priority)
-2. WordPress options (database)
+1. API key from the core connectors page or the `BEDROCK_API_KEY` constant/environment variable
+2. Plugin settings: `BEDROCK_API_KEY` option, then IAM key pair (constants before options)
 3. Defaults (empty for keys, `eu-north-1` for region)
 
 ### AWS IAM Permissions
 
-The IAM user needs the `bedrock:InvokeModel` permission:
+When using an IAM access key pair, the IAM user needs the `bedrock:InvokeModel` permission:
 
 ```json
 {
@@ -74,7 +99,7 @@ The IAM user needs the `bedrock:InvokeModel` permission:
 - Tool use and function calling
 - Structured outputs with JSON schemas
 - Token usage tracking
-- AWS SigV4 request signing via AWS SDK
+- Bedrock API key (Bearer token) or AWS SigV4 request signing via AWS SDK
 
 ## Available Regions
 
@@ -90,7 +115,14 @@ The IAM user needs the `bedrock:InvokeModel` permission:
 
 ```bash
 composer install
-vendor/bin/phpunit
+composer test:unit
+```
+
+Integration tests make real API calls to Amazon Bedrock. Copy `.env.example`
+to `.env`, fill in your credentials, and run:
+
+```bash
+composer test:integration
 ```
 
 ### Static Analysis
