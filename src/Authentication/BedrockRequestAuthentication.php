@@ -9,6 +9,7 @@ use Aws\Signature\SignatureV4;
 use GuzzleHttp\Psr7\Request as Psr7Request;
 use WordPress\AiClient\Common\AbstractDataTransferObject;
 use WordPress\AiClient\Providers\Http\Contracts\RequestAuthenticationInterface;
+use WordPress\AiClient\Providers\Http\DTO\ApiKeyRequestAuthentication;
 use WordPress\AiClient\Providers\Http\DTO\Request;
 
 /**
@@ -18,7 +19,7 @@ use WordPress\AiClient\Providers\Http\DTO\Request;
  *
  * @phpstan-type BedrockAuthArrayShape array{
  *     accessKeyId: string,
- *     secretAccessKey: string,
+ *     secretAccessKey?: string,
  *     region: string
  * }
  *
@@ -83,11 +84,39 @@ class BedrockRequestAuthentication extends AbstractDataTransferObject implements
         foreach ($signedHeaders as $headerName) {
             $headerValue = $signedPsrRequest->getHeaderLine($headerName);
             if ($headerValue !== '') {
-                $request = $request->withHeader($headerName, $headerValue);
+                /*
+                 * Pass the value as a single-element array: string values are
+                 * split on commas by the AI Client's HeadersCollection, which
+                 * would break the comma-containing SigV4 Authorization header
+                 * into multiple header lines that AWS rejects.
+                 */
+                $request = $request->withHeader($headerName, [$headerValue]);
             }
         }
 
         return $request;
+    }
+
+    /**
+     * Creates the appropriate request authentication from plugin settings.
+     *
+     * Prefers a Bedrock API key (sent as a Bearer token) when one is configured,
+     * and falls back to AWS Signature V4 with an IAM access key pair otherwise.
+     *
+     * @since 1.0.0
+     *
+     * @return RequestAuthenticationInterface
+     *
+     * @throws \RuntimeException If no credentials are configured.
+     */
+    public static function createFromSettings(): RequestAuthenticationInterface
+    {
+        $apiKey = \AiProviderForBedrock\get_bedrock_api_key();
+        if ($apiKey !== '') {
+            return new ApiKeyRequestAuthentication($apiKey);
+        }
+
+        return self::fromSettings();
     }
 
     /**
@@ -106,7 +135,10 @@ class BedrockRequestAuthentication extends AbstractDataTransferObject implements
         $region = \AiProviderForBedrock\get_bedrock_region();
 
         if ($accessKeyId === '' || $secretAccessKey === '') {
-            throw new \RuntimeException('AWS access key ID and secret access key must be configured.');
+            throw new \RuntimeException(
+                'Bedrock credentials must be configured: either an API key, '
+                . 'or an AWS access key ID and secret access key.'
+            );
         }
 
         return new self(

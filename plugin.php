@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Plugin Name: AI Provider for Claude on Bedrock
  * Plugin URI: https://github.com/saarnilauri/ai-provider-for-bedrock
@@ -11,7 +12,6 @@
  * License: GPL-2.0-or-later
  * License URI: https://spdx.org/licenses/GPL-2.0-or-later.html
  * Text Domain: ai-provider-for-bedrock
- * Requires Plugins: wordpress/php-ai-client
  *
  * @package AiProviderForBedrock
  */
@@ -23,6 +23,7 @@ namespace AiProviderForBedrock;
 use AiProviderForBedrock\Authentication\BedrockRequestAuthentication;
 use AiProviderForBedrock\Provider\ProviderForBedrock;
 use WordPress\AiClient\AiClient;
+use WordPress\AiClient\Providers\Http\DTO\ApiKeyRequestAuthentication;
 
 if (!defined('ABSPATH')) {
     return;
@@ -77,12 +78,14 @@ function register_provider(): void
 add_action('init', __NAMESPACE__ . '\\register_provider', 5);
 
 /**
- * Re-applies Bedrock-specific authentication after AI_Client::init().
+ * Applies plugin-configured Bedrock authentication as a fallback after AI_Client::init().
  *
- * The API_Credentials_Manager (running at init priority 10) overwrites all
- * provider auth with the generic ApiKeyRequestAuthentication (Authorization: Bearer),
- * but Bedrock requires AWS Signature V4 authentication. This hook runs after that to
- * restore the correct authentication class.
+ * An API key managed via the WordPress core connectors settings page (applied by
+ * the credentials manager at init priority 10) takes precedence and is left
+ * untouched — Bedrock API keys work with the generic Bearer authentication. This
+ * hook only fills the gap when no usable authentication is set on the registry,
+ * using the plugin's own settings: a Bedrock API key, or an IAM access key pair
+ * for AWS Signature V4 signing.
  *
  * @since 1.0.0
  *
@@ -106,22 +109,46 @@ function restore_bedrock_authentication(): void
         return;
     }
 
-    if ($currentAuth === null) {
+    if ($currentAuth instanceof ApiKeyRequestAuthentication && $currentAuth->getApiKey() !== '') {
+        // A key stored via the core connectors page (or BEDROCK_API_KEY) is in use.
         return;
     }
 
     try {
-        $registry->setProviderRequestAuthentication(
-            ProviderForBedrock::class,
-            BedrockRequestAuthentication::fromSettings()
-        );
+        $desiredAuth = BedrockRequestAuthentication::createFromSettings();
     } catch (\RuntimeException $e) {
         // Credentials not configured yet; silently return.
         return;
     }
+
+    $registry->setProviderRequestAuthentication(ProviderForBedrock::class, $desiredAuth);
 }
 
 add_action('init', __NAMESPACE__ . '\\restore_bedrock_authentication', 11);
+
+/**
+ * Gets the Amazon Bedrock API key.
+ *
+ * Bedrock API keys (long-term or short-term) are sent as a Bearer token
+ * instead of signing requests with AWS Signature V4. When a non-empty API key
+ * is configured, it takes precedence over the access key pair.
+ *
+ * @since 1.0.0
+ *
+ * @return string The Bedrock API key.
+ */
+function get_bedrock_api_key(): string
+{
+    if (defined('BEDROCK_API_KEY')) {
+        return (string) constant('BEDROCK_API_KEY');
+    }
+    if (!function_exists('get_option')) {
+        // Outside WordPress (e.g. tests), only the constant is supported.
+        return '';
+    }
+    $option = get_option('bedrock_ai_api_key', '');
+    return is_string($option) ? $option : '';
+}
 
 /**
  * Gets the AWS access key ID for Bedrock.
@@ -134,6 +161,10 @@ function get_bedrock_access_key_id(): string
 {
     if (defined('BEDROCK_ACCESS_KEY_ID')) {
         return (string) constant('BEDROCK_ACCESS_KEY_ID');
+    }
+    if (!function_exists('get_option')) {
+        // Outside WordPress (e.g. tests), only the constant is supported.
+        return '';
     }
     $option = get_option('bedrock_ai_access_key_id', '');
     return is_string($option) ? $option : '';
@@ -151,6 +182,10 @@ function get_bedrock_secret_access_key(): string
     if (defined('BEDROCK_SECRET_ACCESS_KEY')) {
         return (string) constant('BEDROCK_SECRET_ACCESS_KEY');
     }
+    if (!function_exists('get_option')) {
+        // Outside WordPress (e.g. tests), only the constant is supported.
+        return '';
+    }
     $option = get_option('bedrock_ai_secret_access_key', '');
     return is_string($option) ? $option : '';
 }
@@ -167,6 +202,10 @@ function get_bedrock_region(): string
     if (defined('BEDROCK_REGION')) {
         return (string) constant('BEDROCK_REGION');
     }
+    if (!function_exists('get_option')) {
+        // Outside WordPress (e.g. tests), only the constant is supported.
+        return 'eu-north-1';
+    }
     $option = get_option('bedrock_ai_region', 'eu-north-1');
     return is_string($option) && $option !== '' ? $option : 'eu-north-1';
 }
@@ -174,6 +213,19 @@ function get_bedrock_region(): string
 // ---------------------------------------------------------------------------
 // Setter functions
 // ---------------------------------------------------------------------------
+
+/**
+ * Sets the Bedrock API key option.
+ *
+ * @since 1.0.0
+ *
+ * @param string $value The Bedrock API key.
+ * @return void
+ */
+function set_bedrock_api_key(string $value): void
+{
+    update_option('bedrock_ai_api_key', $value);
+}
 
 /**
  * Sets the AWS access key ID option.
@@ -217,6 +269,22 @@ function set_bedrock_region(string $value): void
 // ---------------------------------------------------------------------------
 // Sanitization callbacks
 // ---------------------------------------------------------------------------
+
+/**
+ * Sanitizes the Bedrock API key.
+ *
+ * Trims whitespace. Kept otherwise as-is because Bedrock API keys are
+ * base64-encoded and may contain special characters.
+ *
+ * @since 1.0.0
+ *
+ * @param string $value Raw input value.
+ * @return string Sanitized value.
+ */
+function sanitize_bedrock_api_key(string $value): string
+{
+    return trim($value);
+}
 
 /**
  * Sanitizes the AWS access key ID.
@@ -317,6 +385,11 @@ add_action('admin_menu', __NAMESPACE__ . '\\add_settings_page');
 function register_settings(): void
 {
     // Register settings.
+    register_setting('bedrock_ai_settings', 'bedrock_ai_api_key', [
+        'type'              => 'string',
+        'sanitize_callback' => __NAMESPACE__ . '\\sanitize_bedrock_api_key',
+        'default'           => '',
+    ]);
     register_setting('bedrock_ai_settings', 'bedrock_ai_access_key_id', [
         'type'              => 'string',
         'sanitize_callback' => __NAMESPACE__ . '\\sanitize_bedrock_access_key',
@@ -342,6 +415,13 @@ function register_settings(): void
     );
 
     // Add fields.
+    add_settings_field(
+        'bedrock_ai_api_key',
+        __('Bedrock API Key', 'ai-provider-for-bedrock'),
+        __NAMESPACE__ . '\\render_api_key_field',
+        'bedrock-ai-settings',
+        'bedrock_ai_main'
+    );
     add_settings_field(
         'bedrock_ai_access_key_id',
         __('AWS Access Key ID', 'ai-provider-for-bedrock'),
@@ -387,6 +467,37 @@ function render_settings_page(): void
 }
 
 /**
+ * Renders the Bedrock API Key field.
+ *
+ * @since 1.0.0
+ *
+ * @return void
+ */
+function render_api_key_field(): void
+{
+    $value    = get_option('bedrock_ai_api_key', '');
+    $disabled = defined('BEDROCK_API_KEY');
+
+    printf(
+        '<input type="password" id="bedrock_ai_api_key" name="bedrock_ai_api_key"'
+        . ' value="%s" class="regular-text" %s />',
+        esc_attr(is_string($value) ? $value : ''),
+        $disabled ? 'disabled="disabled"' : ''
+    );
+
+    echo '<p class="description">';
+    if ($disabled) {
+        echo esc_html__('Currently overridden by PHP constant BEDROCK_API_KEY.', 'ai-provider-for-bedrock');
+    } else {
+        echo esc_html__(
+            'Optional. When set, the API key is used instead of the AWS access key pair below.',
+            'ai-provider-for-bedrock'
+        );
+    }
+    echo '</p>';
+}
+
+/**
  * Renders the AWS Access Key ID field.
  *
  * @since 1.0.0
@@ -399,7 +510,8 @@ function render_access_key_field(): void
     $disabled = defined('BEDROCK_ACCESS_KEY_ID');
 
     printf(
-        '<input type="text" id="bedrock_ai_access_key_id" name="bedrock_ai_access_key_id" value="%s" class="regular-text" %s />',
+        '<input type="text" id="bedrock_ai_access_key_id" name="bedrock_ai_access_key_id"'
+        . ' value="%s" class="regular-text" %s />',
         esc_attr(is_string($value) ? $value : ''),
         $disabled ? 'disabled="disabled"' : ''
     );
@@ -424,7 +536,8 @@ function render_secret_key_field(): void
     $disabled = defined('BEDROCK_SECRET_ACCESS_KEY');
 
     printf(
-        '<input type="password" id="bedrock_ai_secret_access_key" name="bedrock_ai_secret_access_key" value="%s" class="regular-text" %s />',
+        '<input type="password" id="bedrock_ai_secret_access_key" name="bedrock_ai_secret_access_key"'
+        . ' value="%s" class="regular-text" %s />',
         esc_attr(is_string($value) ? $value : ''),
         $disabled ? 'disabled="disabled"' : ''
     );
