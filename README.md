@@ -10,13 +10,27 @@ This plugin extends the WordPress AI Client SDK to enable Claude model access th
 
 ## Supported Models
 
+The plugin discovers the available Claude models at runtime from the Amazon
+Bedrock [inference profiles API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)
+and caches the result for one hour. All active Anthropic models in the
+configured region are listed — for example Claude Opus, Sonnet, Haiku, and
+Fable families, as available in your account's region.
+
+If the API cannot be reached (e.g. the credential lacks the
+`bedrock:ListInferenceProfiles` permission), the plugin falls back to a
+hardcoded list:
+
 | Model | Bedrock Model ID |
 |---|---|
 | Claude Opus 4.6 | `anthropic.claude-opus-4-6-v1` |
 | Claude Sonnet 4.6 | `anthropic.claude-sonnet-4-6` |
 | Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` |
 
-These Claude models do not support on-demand invocation of the bare foundation-model ID, so the plugin exposes them as cross-region inference profile IDs, prefixed with the geographic area derived from the configured region (e.g. `eu.anthropic.claude-sonnet-4-6` for `eu-north-1`, `us.` for US regions).
+Notes:
+
+- Claude models do not support on-demand invocation of the bare foundation-model ID, so the plugin exposes them as cross-region inference profile IDs, prefixed with the geographic area derived from the configured region (e.g. `eu.anthropic.claude-sonnet-4-6` for `eu-north-1`, `us.` for US regions).
+- A listed model is not necessarily enabled for your AWS account. Anthropic models are served from the AWS Marketplace and are enabled account-wide on their first invocation — which must be made by a principal with AWS Marketplace permissions (e.g. test the model once in the Bedrock console playground as an administrator). A Bedrock API key alone cannot enable new models and gets a `403` until the model has been enabled.
+- Automatic model selection defaults to a curated known-good model (Claude Opus 4.6); newly discovered models are listed after the curated ones and can be selected explicitly.
 
 ## Requirements
 
