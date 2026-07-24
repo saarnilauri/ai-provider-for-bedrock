@@ -6,6 +6,7 @@ namespace AiProviderForBedrock\Tests\Unit\Metadata;
 
 use PHPUnit\Framework\TestCase;
 use WordPress\AiClient\Messages\Enums\ModalityEnum;
+use WordPress\AiClient\Providers\Http\DTO\Response;
 use WordPress\AiClient\Providers\Models\DTO\ModelMetadata;
 use WordPress\AiClient\Providers\Models\DTO\SupportedOption;
 use WordPress\AiClient\Providers\Models\Enums\CapabilityEnum;
@@ -16,6 +17,98 @@ use WordPress\AiClient\Providers\Models\Enums\OptionEnum;
  */
 class ProviderForBedrockModelMetadataDirectoryTest extends TestCase
 {
+    /**
+     * Builds an inference profiles API response from summaries.
+     *
+     * @param list<array<string, string>> $summaries
+     */
+    private function createProfilesResponse(array $summaries): Response
+    {
+        return new Response(200, [], json_encode(['inferenceProfileSummaries' => $summaries]));
+    }
+
+    /**
+     * Tests that only active Anthropic profiles are included.
+     */
+    public function testParseInferenceProfilesFiltersToActiveAnthropicModels(): void
+    {
+        $directory = new MockProviderForBedrockModelMetadataDirectory();
+        $profiles = $directory->exposeParseInferenceProfilesResponse($this->createProfilesResponse([
+            [
+                'inferenceProfileId' => 'us.anthropic.claude-sonnet-4-6',
+                'inferenceProfileName' => 'US Anthropic Claude Sonnet 4.6',
+                'status' => 'ACTIVE',
+            ],
+            [
+                'inferenceProfileId' => 'us.anthropic.claude-opus-4-6-v1',
+                'inferenceProfileName' => 'US Anthropic Claude Opus 4.6',
+                'status' => 'INACTIVE',
+            ],
+            [
+                'inferenceProfileId' => 'us.meta.llama4-maverick-v1:0',
+                'inferenceProfileName' => 'US Meta Llama 4 Maverick',
+                'status' => 'ACTIVE',
+            ],
+        ]));
+
+        $this->assertSame(
+            ['us.anthropic.claude-sonnet-4-6' => 'Claude Sonnet 4.6'],
+            $profiles
+        );
+    }
+
+    /**
+     * Tests that geo-specific profiles are preferred over global duplicates,
+     * while global-only models are still included.
+     */
+    public function testParseInferenceProfilesPrefersGeoProfileOverGlobal(): void
+    {
+        // The stubbed region is us-east-1, so "us." profiles are preferred.
+        $directory = new MockProviderForBedrockModelMetadataDirectory();
+        $profiles = $directory->exposeParseInferenceProfilesResponse($this->createProfilesResponse([
+            [
+                'inferenceProfileId' => 'global.anthropic.claude-sonnet-4-6',
+                'inferenceProfileName' => 'Global Anthropic Claude Sonnet 4.6',
+                'status' => 'ACTIVE',
+            ],
+            [
+                'inferenceProfileId' => 'us.anthropic.claude-sonnet-4-6',
+                'inferenceProfileName' => 'US Anthropic Claude Sonnet 4.6',
+                'status' => 'ACTIVE',
+            ],
+            [
+                'inferenceProfileId' => 'global.anthropic.claude-fable-5',
+                'inferenceProfileName' => 'Global Anthropic Claude Fable 5',
+                'status' => 'ACTIVE',
+            ],
+        ]));
+
+        $this->assertSame(
+            [
+                'us.anthropic.claude-sonnet-4-6' => 'Claude Sonnet 4.6',
+                'global.anthropic.claude-fable-5' => 'Claude Fable 5',
+            ],
+            $profiles
+        );
+    }
+
+    /**
+     * Tests that a malformed response yields no profiles.
+     */
+    public function testParseInferenceProfilesHandlesMalformedResponse(): void
+    {
+        $directory = new MockProviderForBedrockModelMetadataDirectory();
+
+        $this->assertSame(
+            [],
+            $directory->exposeParseInferenceProfilesResponse(new Response(200, [], json_encode(['foo' => 'bar'])))
+        );
+        $this->assertSame(
+            [],
+            $directory->exposeParseInferenceProfilesResponse(new Response(200, [], 'not json'))
+        );
+    }
+
     /**
      * Tests that hardcoded model list returns all expected Claude models.
      */

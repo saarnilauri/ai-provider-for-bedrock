@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace AiProviderForBedrock\Metadata;
 
+use AiProviderForBedrock\Authentication\BedrockRequestAuthentication;
 use AiProviderForBedrock\Provider\ProviderForBedrock;
+use WordPress\AiClient\Common\Exception\RuntimeException;
 use WordPress\AiClient\Messages\Enums\ModalityEnum;
+use WordPress\AiClient\Providers\Http\Contracts\RequestAuthenticationInterface;
+use WordPress\AiClient\Providers\Http\DTO\ApiKeyRequestAuthentication;
 use WordPress\AiClient\Providers\Http\DTO\Request;
 use WordPress\AiClient\Providers\Http\DTO\Response;
 use WordPress\AiClient\Providers\Http\Enums\HttpMethodEnum;
@@ -18,24 +22,34 @@ use WordPress\AiClient\Providers\OpenAiCompatibleImplementation\AbstractOpenAiCo
 /**
  * Model metadata directory for Amazon Bedrock Claude models.
  *
- * Uses a hardcoded model list since Bedrock has no /models API endpoint.
- * When AWS releases new Claude models, update the BEDROCK_CLAUDE_MODELS constant.
+ * Fetches the available Claude models from the Bedrock control-plane
+ * inference profiles API, falling back to a hardcoded list when the API
+ * is unreachable (e.g. missing permissions, network failure, or outside
+ * WordPress). Results are cached in a transient for one hour.
  *
- * Model IDs are exposed as cross-region inference profile IDs (with a
- * geo prefix like "eu." derived from the configured region), because
- * these Claude models do not support on-demand invocation of the bare
- * foundation-model ID.
+ * Model IDs are cross-region inference profile IDs (with a geo prefix like
+ * "eu." derived from the configured region), because these Claude models do
+ * not support on-demand invocation of the bare foundation-model ID.
  *
- * Models last updated: 2026-07-24
+ * Fallback models last updated: 2026-07-24
  *
  * @since 1.0.0
- * @see https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
  * @see https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
  */
 class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleModelMetadataDirectory
 {
     /**
-     * Hardcoded Bedrock Claude models.
+     * Transient name prefix for caching the fetched model list.
+     */
+    private const CACHE_TRANSIENT_PREFIX = 'ai_provider_for_bedrock_models_';
+
+    /**
+     * Cache lifetime for the fetched model list, in seconds.
+     */
+    private const CACHE_TTL = 3600;
+
+    /**
+     * Hardcoded fallback Bedrock Claude models.
      * Foundation model ID (without geo prefix) => display name.
      */
     private const BEDROCK_CLAUDE_MODELS = [
@@ -47,20 +61,233 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
     /**
      * Model sort order. Lower = higher priority.
      */
+    /*
+     * Fable sorts after the standard families on purpose: it requires
+     * account-level data retention configuration on Bedrock, so it must not
+     * be the default model that automatic selection picks first.
+     */
     private const MODEL_SORT_ORDER = [
         'opus' => 1,
         'sonnet' => 2,
         'haiku' => 3,
+        'fable' => 4,
     ];
 
     /**
-     * Returns hardcoded Claude models. No HTTP request is made.
+     * Returns the available Claude models.
+     *
+     * Tries the Bedrock inference profiles API first and falls back to the
+     * hardcoded list on any failure.
      *
      * @since 1.0.0
      *
-     * @return array<string, ModelMetadata> Keyed by model ID.
+     * @return array<string, ModelMetadata> Keyed by inference profile ID.
      */
     protected function sendListModelsRequest(): array
+    {
+        try {
+            $profiles = $this->fetchInferenceProfiles();
+        } catch (\Throwable $e) {
+            $profiles = [];
+        }
+
+        if ($profiles === []) {
+            $profiles = $this->getFallbackProfiles();
+        }
+
+        $models = [];
+        foreach ($profiles as $profileId => $displayName) {
+            $models[$profileId] = $this->createClaudeModelMetadata($profileId, $displayName);
+        }
+
+        // Sort: Opus > Sonnet > Haiku > Fable
+        uasort($models, [$this, 'modelSortCallback']);
+
+        return $models;
+    }
+
+    /**
+     * Fetches available Claude inference profiles from the Bedrock control-plane API.
+     *
+     * @since 1.0.0
+     *
+     * @return array<string, string> Inference profile ID => display name. Empty on failure.
+     */
+    protected function fetchInferenceProfiles(): array
+    {
+        $region = \AiProviderForBedrock\get_bedrock_region();
+        $cacheKey = self::CACHE_TRANSIENT_PREFIX . md5($region);
+
+        if (function_exists('get_transient')) {
+            $cached = get_transient($cacheKey);
+            if (is_array($cached) && $cached !== []) {
+                /** @var array<string, string> $cached */
+                return $cached;
+            }
+        }
+
+        $request = new Request(
+            HttpMethodEnum::GET(),
+            'https://bedrock.' . $region . '.amazonaws.com/inference-profiles?maxResults=100',
+            ['Accept' => 'application/json']
+        );
+        $request = $this->resolveRequestAuthentication()->authenticateRequest($request);
+
+        $response = $this->getHttpTransporter()->send($request);
+        if (!$response->isSuccessful()) {
+            return [];
+        }
+
+        $profiles = $this->parseInferenceProfilesResponse($response);
+
+        if ($profiles !== [] && function_exists('set_transient')) {
+            set_transient($cacheKey, $profiles, self::CACHE_TTL);
+        }
+
+        return $profiles;
+    }
+
+    /**
+     * Parses an inference profiles API response into a Claude model list.
+     *
+     * Filters to active Anthropic profiles and de-duplicates models available
+     * under both a geo-specific (e.g. "eu.") and a "global." profile,
+     * preferring the geo-specific one for the configured region.
+     *
+     * @since 1.0.0
+     *
+     * @param Response $response The inference profiles API response.
+     * @return array<string, string> Inference profile ID => display name.
+     */
+    protected function parseInferenceProfilesResponse(Response $response): array
+    {
+        $data = $response->getData();
+        if (!is_array($data) || !isset($data['inferenceProfileSummaries']) || !is_array($data['inferenceProfileSummaries'])) {
+            return [];
+        }
+
+        $geoPrefix = self::getGeoPrefix();
+
+        /** @var array<string, array{id: string, name: string, preferred: bool}> $byBaseId */
+        $byBaseId = [];
+        foreach ($data['inferenceProfileSummaries'] as $summary) {
+            if (!is_array($summary)) {
+                continue;
+            }
+            $profileId = $summary['inferenceProfileId'] ?? '';
+            $status = $summary['status'] ?? '';
+            if (!is_string($profileId) || $status !== 'ACTIVE' || !str_contains($profileId, 'anthropic.')) {
+                continue;
+            }
+
+            $displayName = $summary['inferenceProfileName'] ?? '';
+            $displayName = is_string($displayName) && $displayName !== ''
+                ? $this->normalizeDisplayName($displayName)
+                : $profileId;
+
+            $baseId = (string) preg_replace('/^[a-z-]+\./', '', $profileId);
+            $preferred = str_starts_with($profileId, $geoPrefix);
+
+            if (isset($byBaseId[$baseId]) && $byBaseId[$baseId]['preferred'] && !$preferred) {
+                continue;
+            }
+            $byBaseId[$baseId] = [
+                'id' => $profileId,
+                'name' => $displayName,
+                'preferred' => $preferred,
+            ];
+        }
+
+        $profiles = [];
+        foreach ($byBaseId as $entry) {
+            $profiles[$entry['id']] = $entry['name'];
+        }
+
+        return $profiles;
+    }
+
+    /**
+     * Normalizes an inference profile display name.
+     *
+     * Strips the leading geo qualifier and vendor name, e.g.
+     * "EU Anthropic Claude Opus 4.6" becomes "Claude Opus 4.6".
+     *
+     * @since 1.0.0
+     *
+     * @param string $name The raw inference profile name.
+     * @return string The normalized display name.
+     */
+    private function normalizeDisplayName(string $name): string
+    {
+        $name = (string) preg_replace('/^(EU|US|APAC|GLOBAL)\s+/i', '', $name);
+        return (string) preg_replace('/^Anthropic\s+/i', '', $name);
+    }
+
+    /**
+     * Returns the request authentication for the control-plane API call.
+     *
+     * Prefers authentication injected by the registry (e.g. an API key stored
+     * via the WordPress core connectors settings page) and falls back to
+     * plugin settings.
+     *
+     * @since 1.0.0
+     *
+     * @return RequestAuthenticationInterface
+     */
+    protected function resolveRequestAuthentication(): RequestAuthenticationInterface
+    {
+        try {
+            $requestAuthentication = $this->getRequestAuthentication();
+        } catch (RuntimeException $e) {
+            $requestAuthentication = null;
+        }
+
+        if (
+            $requestAuthentication instanceof ApiKeyRequestAuthentication
+            && $requestAuthentication->getApiKey() === ''
+        ) {
+            $requestAuthentication = null;
+        }
+
+        if ($requestAuthentication !== null) {
+            return $requestAuthentication;
+        }
+
+        return BedrockRequestAuthentication::createFromSettings();
+    }
+
+    /**
+     * Returns the hardcoded fallback models with the region geo prefix applied.
+     *
+     * @since 1.0.0
+     *
+     * @return array<string, string> Inference profile ID => display name.
+     */
+    protected function getFallbackProfiles(): array
+    {
+        $geoPrefix = self::getGeoPrefix();
+
+        $profiles = [];
+        foreach (self::BEDROCK_CLAUDE_MODELS as $modelId => $displayName) {
+            $profiles[$geoPrefix . $modelId] = $displayName;
+        }
+
+        return $profiles;
+    }
+
+    /**
+     * Creates the model metadata for a Claude model.
+     *
+     * The inference profiles API returns no capability information, so all
+     * Claude models share the same capability and option set.
+     *
+     * @since 1.0.0
+     *
+     * @param string $modelId The inference profile ID.
+     * @param string $displayName The display name.
+     * @return ModelMetadata The model metadata.
+     */
+    protected function createClaudeModelMetadata(string $modelId, string $displayName): ModelMetadata
     {
         $capabilities = [
             CapabilityEnum::textGeneration(),
@@ -90,23 +317,7 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
             new SupportedOption(OptionEnum::outputModalities(), [[ModalityEnum::text()]]),
         ];
 
-        $geoPrefix = self::getGeoPrefix();
-
-        $models = [];
-        foreach (self::BEDROCK_CLAUDE_MODELS as $modelId => $displayName) {
-            $profileId = $geoPrefix . $modelId;
-            $models[$profileId] = new ModelMetadata(
-                $profileId,
-                $displayName,
-                $capabilities,
-                $options
-            );
-        }
-
-        // Sort: Opus > Sonnet > Haiku
-        uasort($models, [$this, 'modelSortCallback']);
-
-        return $models;
+        return new ModelMetadata($modelId, $displayName, $capabilities, $options);
     }
 
     /**
@@ -137,18 +348,32 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
     }
 
     /**
-     * Returns the sort weight for a model ID based on its family.
+     * Returns the sort weight for a model ID.
+     *
+     * Sorts by model family, and within a family prefers the curated models
+     * from the fallback list. The inference profiles API exposes no
+     * entitlement information, so a discovered model may not be enabled for
+     * the account — automatic model selection picks the first model, which
+     * must be a known-good one.
      *
      * @since 1.0.0
      */
     private function getModelSortWeight(string $modelId): int
     {
-        foreach (self::MODEL_SORT_ORDER as $family => $weight) {
+        $weight = 990;
+        foreach (self::MODEL_SORT_ORDER as $family => $familyWeight) {
             if (str_contains($modelId, $family)) {
-                return $weight;
+                $weight = $familyWeight * 10;
+                break;
             }
         }
-        return 99;
+
+        $baseId = (string) preg_replace('/^[a-z-]+\./', '', $modelId);
+        if (isset(self::BEDROCK_CLAUDE_MODELS[$baseId])) {
+            $weight -= 5;
+        }
+
+        return $weight;
     }
 
     /**
