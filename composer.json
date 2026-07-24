@@ -1,7 +1,7 @@
 {
     "name": "saarnilauri/ai-provider-for-bedrock",
     "description": "Amazon Bedrock Claude provider for WordPress AI Client",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "type": "wordpress-plugin",
     "license": "GPL-2.0-or-later",
     "require": {
