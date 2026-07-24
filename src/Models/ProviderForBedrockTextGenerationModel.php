@@ -15,10 +15,13 @@ use WordPress\AiClient\Messages\Enums\MessagePartChannelEnum;
 use WordPress\AiClient\Messages\Enums\MessageRoleEnum;
 use WordPress\AiClient\Providers\ApiBasedImplementation\AbstractApiBasedModel;
 use WordPress\AiClient\Providers\Http\Contracts\RequestAuthenticationInterface;
+use WordPress\AiClient\Providers\Http\DTO\ApiKeyRequestAuthentication;
 use WordPress\AiClient\Providers\Http\DTO\Request;
 use WordPress\AiClient\Providers\Http\DTO\Response;
 use WordPress\AiClient\Providers\Http\Enums\HttpMethodEnum;
+use WordPress\AiClient\Providers\Http\Exception\ClientException;
 use WordPress\AiClient\Providers\Http\Exception\ResponseException;
+use WordPress\AiClient\Providers\Http\Exception\ServerException;
 use WordPress\AiClient\Providers\Http\Util\ResponseUtil;
 use WordPress\AiClient\Providers\Models\TextGeneration\Contracts\TextGenerationModelInterface;
 use WordPress\AiClient\Results\DTO\Candidate;
@@ -63,13 +66,47 @@ class ProviderForBedrockTextGenerationModel extends AbstractApiBasedModel implem
     public const DEFAULT_MAX_TOKENS = 4096;
 
     /**
+     * Anthropic API version identifier required by Bedrock's InvokeModel API.
+     *
+     * @since 1.0.0
+     *
+     * @var string
+     */
+    public const ANTHROPIC_VERSION = 'bedrock-2023-05-31';
+
+    /**
      * {@inheritDoc}
+     *
+     * Prefers authentication injected by the registry, e.g. an API key stored
+     * via the WordPress core connectors settings page. Bedrock API keys are
+     * sent as Bearer tokens, so the generic ApiKeyRequestAuthentication works
+     * as-is. Falls back to plugin settings (API key, or an IAM access key pair
+     * for AWS Signature V4) when the registry has no usable authentication.
      *
      * @since 1.0.0
      */
     public function getRequestAuthentication(): RequestAuthenticationInterface
     {
-        return BedrockRequestAuthentication::fromSettings();
+        try {
+            $requestAuthentication = parent::getRequestAuthentication();
+        } catch (RuntimeException $e) {
+            // No authentication injected by the registry.
+            $requestAuthentication = null;
+        }
+
+        if (
+            $requestAuthentication instanceof ApiKeyRequestAuthentication
+            && $requestAuthentication->getApiKey() === ''
+        ) {
+            // An empty API key means nothing is stored; fall back to plugin settings.
+            $requestAuthentication = null;
+        }
+
+        if ($requestAuthentication !== null) {
+            return $requestAuthentication;
+        }
+
+        return BedrockRequestAuthentication::createFromSettings();
     }
 
     /**
@@ -104,7 +141,7 @@ class ProviderForBedrockTextGenerationModel extends AbstractApiBasedModel implem
 
         // Send and process the request.
         $response = $httpTransporter->send($request);
-        ResponseUtil::throwIfNotSuccessful($response);
+        $this->throwIfNotSuccessful($response);
         return $this->parseResponseToGenerativeAiResult($response);
     }
 
@@ -135,6 +172,7 @@ class ProviderForBedrockTextGenerationModel extends AbstractApiBasedModel implem
         $config = $this->getConfig();
 
         $params = [
+            'anthropic_version' => self::ANTHROPIC_VERSION,
             'messages' => $this->prepareMessagesParam($prompt),
         ];
 
@@ -174,9 +212,11 @@ class ProviderForBedrockTextGenerationModel extends AbstractApiBasedModel implem
         $outputMimeType = $config->getOutputMimeType();
         $outputSchema = $config->getOutputSchema();
         if ($outputMimeType === 'application/json' && $outputSchema) {
-            $params['output_format'] = [
-                'type' => 'json_schema',
-                'schema' => $outputSchema,
+            $params['output_config'] = [
+                'format' => [
+                    'type' => 'json_schema',
+                    'schema' => $outputSchema,
+                ],
             ];
         }
 
@@ -421,6 +461,34 @@ class ProviderForBedrockTextGenerationModel extends AbstractApiBasedModel implem
         }
 
         return $tools;
+    }
+
+    /**
+     * Throws an appropriate exception if the given response is not successful.
+     *
+     * Wraps ResponseUtil::throwIfNotSuccessful() to append AWS-specific error
+     * details ("__type"/"Message" formats) that the AI Client's generic error
+     * message extraction does not recognize.
+     *
+     * @since 1.0.0
+     *
+     * @param Response $response The HTTP response to check.
+     */
+    protected function throwIfNotSuccessful(Response $response): void
+    {
+        try {
+            ResponseUtil::throwIfNotSuccessful($response);
+        } catch (ClientException | ServerException $exception) {
+            $awsMessage = self::getAwsErrorMessage((string) ($response->getBody() ?? ''));
+            if ($awsMessage === null || str_contains($exception->getMessage(), $awsMessage)) {
+                throw $exception;
+            }
+            $exceptionClass = get_class($exception);
+            throw new $exceptionClass(
+                $exception->getMessage() . ' - ' . $awsMessage,
+                (int) $exception->getCode()
+            );
+        }
     }
 
     /**
