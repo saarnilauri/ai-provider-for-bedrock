@@ -10,6 +10,14 @@
 
     <rule ref="PSR12"/>
 
+    <!--
+     The main plugin file must both declare symbols and have side effects
+     (WordPress plugin bootstrap pattern), so this sniff cannot apply to it.
+    -->
+    <rule ref="PSR1.Files.SideEffects.FoundWithSymbols">
+        <exclude-pattern>plugin.php</exclude-pattern>
+    </rule>
+
     <arg name="colors"/>
     <arg value="sp"/>
 </ruleset>
