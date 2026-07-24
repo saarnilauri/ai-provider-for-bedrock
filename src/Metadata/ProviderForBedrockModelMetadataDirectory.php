@@ -21,21 +21,27 @@ use WordPress\AiClient\Providers\OpenAiCompatibleImplementation\AbstractOpenAiCo
  * Uses a hardcoded model list since Bedrock has no /models API endpoint.
  * When AWS releases new Claude models, update the BEDROCK_CLAUDE_MODELS constant.
  *
- * Models last updated: 2025-05-14
+ * Model IDs are exposed as cross-region inference profile IDs (with a
+ * geo prefix like "eu." derived from the configured region), because
+ * these Claude models do not support on-demand invocation of the bare
+ * foundation-model ID.
+ *
+ * Models last updated: 2026-07-24
  *
  * @since 1.0.0
  * @see https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
+ * @see https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
  */
 class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleModelMetadataDirectory
 {
     /**
      * Hardcoded Bedrock Claude models.
-     * Model ID => display name.
+     * Foundation model ID (without geo prefix) => display name.
      */
     private const BEDROCK_CLAUDE_MODELS = [
-        'anthropic.claude-opus-4-20250514' => 'Claude Opus 4.6',
-        'anthropic.claude-sonnet-4-20250514' => 'Claude Sonnet 4.6',
-        'anthropic.claude-haiku-4-20250514' => 'Claude Haiku 4.5',
+        'anthropic.claude-opus-4-6-v1' => 'Claude Opus 4.6',
+        'anthropic.claude-sonnet-4-6' => 'Claude Sonnet 4.6',
+        'anthropic.claude-haiku-4-5-20251001-v1:0' => 'Claude Haiku 4.5',
     ];
 
     /**
@@ -84,10 +90,13 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
             new SupportedOption(OptionEnum::outputModalities(), [[ModalityEnum::text()]]),
         ];
 
+        $geoPrefix = self::getGeoPrefix();
+
         $models = [];
         foreach (self::BEDROCK_CLAUDE_MODELS as $modelId => $displayName) {
-            $models[$modelId] = new ModelMetadata(
-                $modelId,
+            $profileId = $geoPrefix . $modelId;
+            $models[$profileId] = new ModelMetadata(
+                $profileId,
                 $displayName,
                 $capabilities,
                 $options
@@ -98,6 +107,23 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
         uasort($models, [$this, 'modelSortCallback']);
 
         return $models;
+    }
+
+    /**
+     * Returns the cross-region inference profile geo prefix for the configured region.
+     *
+     * Bedrock inference profiles are prefixed with the geographic area of the
+     * region they route within, e.g. "eu." for eu-north-1 or "us." for us-east-1.
+     *
+     * @since 1.0.0
+     *
+     * @return string The geo prefix, including the trailing dot.
+     */
+    private static function getGeoPrefix(): string
+    {
+        $region = \AiProviderForBedrock\get_bedrock_region();
+        $geo = explode('-', $region)[0];
+        return $geo . '.';
     }
 
     /**
