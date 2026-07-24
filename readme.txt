@@ -3,7 +3,7 @@ Contributors: laurisaarni
 Tags: ai, bedrock, claude, artificial-intelligence, connector
 Requires at least: 6.9
 Tested up to: 7.0
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 Requires PHP: 8.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -49,6 +49,12 @@ Yes. Define `BEDROCK_ACCESS_KEY_ID` and `BEDROCK_SECRET_ACCESS_KEY` constants in
 No, this plugin requires the PHP AI Client, which is bundled in WordPress core since 7.0. On WordPress 6.9 the PHP AI Client plugin must be installed and activated. This plugin provides the Bedrock-specific implementation that the PHP AI Client uses.
 
 == Changelog ==
+
+= 0.2.0 =
+
+* Models are now discovered at runtime from the Amazon Bedrock inference profiles API (cached for one hour), with a hardcoded fallback list
+* Geo-specific inference profiles are preferred over global duplicates
+* Automatic model selection defaults to a curated known-good model
 
 = 0.1.0 =
 

@@ -6,7 +6,7 @@
  * Description: Amazon Bedrock Claude provider for WordPress AI Client
  * Requires at least: 6.9
  * Requires PHP: 8.1
- * Version: 0.1.0
+ * Version: 0.2.0
  * Author: Lauri Saarni
  * Author URI: https://profiles.wordpress.org/laurisaarni/
  * License: GPL-2.0-or-later
