@@ -6,12 +6,14 @@ namespace AiProviderForBedrock\Provider;
 
 use AiProviderForBedrock\Metadata\ProviderForBedrockModelMetadataDirectory;
 use AiProviderForBedrock\Models\ProviderForBedrockTextGenerationModel;
+use WordPress\AiClient\AiClient;
 use WordPress\AiClient\Common\Exception\RuntimeException;
 use WordPress\AiClient\Providers\ApiBasedImplementation\AbstractApiProvider;
 use WordPress\AiClient\Providers\Contracts\ModelMetadataDirectoryInterface;
 use WordPress\AiClient\Providers\Contracts\ProviderAvailabilityInterface;
 use WordPress\AiClient\Providers\DTO\ProviderMetadata;
 use WordPress\AiClient\Providers\Enums\ProviderTypeEnum;
+use WordPress\AiClient\Providers\Http\Enums\RequestAuthenticationMethod;
 use WordPress\AiClient\Providers\Models\Contracts\ModelInterface;
 use WordPress\AiClient\Providers\Models\DTO\ModelMetadata;
 
@@ -60,13 +62,34 @@ class ProviderForBedrock extends AbstractApiProvider
      */
     protected static function createProviderMetadata(): ProviderMetadata
     {
-        return new ProviderMetadata(
+        $providerMetadataArgs = [
             'bedrock',
             'Claude on Bedrock',
             ProviderTypeEnum::cloud(),
-            'https://console.aws.amazon.com/bedrock/',
-            null
-        );
+            'https://console.aws.amazon.com/bedrock/home#/api-keys',
+            /*
+             * Declaring API key authentication makes the provider manageable via
+             * the WordPress core connectors settings page, and lets the registry
+             * pick up a BEDROCK_API_KEY environment variable or constant.
+             * Bedrock API keys are sent as Bearer tokens, so the generic
+             * ApiKeyRequestAuthentication works as-is.
+             */
+            RequestAuthenticationMethod::apiKey()
+        ];
+        // Provider description support was added in 1.2.0.
+        if (version_compare(AiClient::VERSION, '1.2.0', '>=')) {
+            // For WordPress, we should translate the description.
+            if (function_exists('__')) {
+                $providerMetadataArgs[] = __('Text generation with Claude on Bedrock.', 'ai-provider-for-bedrock');
+            } else {
+                $providerMetadataArgs[] = 'Text generation with Claude on Bedrock.';
+            }
+        }
+        // Provider logoPath support was added in 1.3.0.
+        if (version_compare(AiClient::VERSION, '1.3.0', '>=')) {
+            $providerMetadataArgs[] = dirname(__DIR__, 2) . '/assets/images/bedrock.svg';
+        }
+        return new ProviderMetadata(...$providerMetadataArgs);
     }
 
     /**
