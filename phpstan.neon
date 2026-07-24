@@ -4,22 +4,7 @@ parameters:
         - src/
     excludePaths:
         - vendor/
+    treatPhpDocTypesAsCertain: false
     ignoreErrors:
+        # Helper functions defined in plugin.php, which is outside the analyzed paths.
         - '#Function AiProviderForBedrock\\get_bedrock_#'
-        - '#Function get_option not found#'
-        - '#Function update_option not found#'
-        - '#Function add_options_page not found#'
-        - '#Function register_setting not found#'
-        - '#Function add_settings_section not found#'
-        - '#Function add_settings_field not found#'
-        - '#Function settings_fields not found#'
-        - '#Function do_settings_sections not found#'
-        - '#Function submit_button not found#'
-        - '#Function get_admin_page_title not found#'
-        - '#Function esc_html not found#'
-        - '#Function esc_attr not found#'
-        - '#Function esc_html__ not found#'
-        - '#Function selected not found#'
-        - '#Function add_action not found#'
-        - '#Function defined not found#'
-        - '#Constant ABSPATH not found#'
