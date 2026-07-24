@@ -162,7 +162,11 @@ class ProviderForBedrockModelMetadataDirectory extends AbstractOpenAiCompatibleM
     protected function parseInferenceProfilesResponse(Response $response): array
     {
         $data = $response->getData();
-        if (!is_array($data) || !isset($data['inferenceProfileSummaries']) || !is_array($data['inferenceProfileSummaries'])) {
+        if (
+            !is_array($data)
+            || !isset($data['inferenceProfileSummaries'])
+            || !is_array($data['inferenceProfileSummaries'])
+        ) {
             return [];
         }
 
